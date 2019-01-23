@@ -3,32 +3,53 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
-	// "time"
-
-	// "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
-	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+	"os"
+	"path/filepath"
 )
 
+// Convert to a consistent unit, please. Otherwise, values will be garbage
+// cpuQuota has a real and a imaginary portion
+// the first element is the real sum for a kind of cpu quota
+// the second element is the count of undefined elements
+
+// all cpu units should be in millicores to avoid working with floating point
+// numbers
+// type cpuQuota [2]int64
+// How is reddis used to cache?
+// How can I rearchitect the kubectl touch command?
+// if
+// c1 = cpuQuota{70, 0}
+// c2 = cpuQuota{0, 2}
+// c1 has a real count of 70 cores and 0 non-defined cores
+// c2 does not have a defined core count for 2 namespaces
+
+// Function names don't make sense yet, but I'm working on that after I clean
+// the code
+
 type quotaSum struct {
-	cpuLimits   int64
-	cpuRequests int64
-	memLimits   int64
-	memRequests int64
+	cpuLimits                [2]int64
+	cpuRequests              [2]int64
+	memLimits                [2]int64
+	memRequests              [2]int64
+	storageRequests          [2]int64
+	ephemeralStorageRequests [2]int64
+	ephemeralStorageLimits   [2]int64
+
+	quotaCount     int
+	namespaceCount int
 }
 
 type nodeSum struct {
-	cpuLimits   int64
-	cpuRequests int64
-	memLimits   int64
-	memRequests int64
+	cpuLimits       int64
+	cpuRequests     int64
+	memLimits       int64
+	memRequests     int64
+	storageRequests int64
 }
 
 func main() {
@@ -45,6 +66,9 @@ func main() {
 	flag.Parse()
 
 	// use the current context in kubeconfig
+	// Doesn't currently work if you keep your context, users, and clusters in
+	// different files. (I could implement something similar to a minify here,
+	// but that would require reading a bunch of files
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		panic(err.Error())
@@ -66,68 +90,47 @@ func main() {
 		panic(err.Error())
 	}
 
-	//var cpuLimitSum int64 = 0
 	var clusterQuota quotaSum
 
-	//var limitNum int64
-	//var canConvert bool
-	//fmt.Println(quotaList)
 	for _, quota := range quotaList {
-		// I really don't want to import core/v1 just for a few structs
-		// I also don't want to use the raw string that is the value
-		//quotaSpec[v1.ResourceLimitsCPU.String()],
-		//quotaSpec[v1.ResourceRequestsCPU.String()],
 		quotaSpec := quota.Spec.Hard
-		clusterQuota.cpuLimits += quantityToInt64(quotaSpec[v1.ResourceLimitsCPU])
-		clusterQuota.cpuRequests += quantityToInt64(quotaSpec[v1.ResourceRequestsCPU])
-		clusterQuota.memLimits += quantityToInt64(quotaSpec[v1.ResourceLimitsMemory])
-		clusterQuota.memRequests += quantityToInt64(quotaSpec[v1.ResourceRequestsMemory])
-		//cpuLimits := quotaSpec[v1.ResourceLimitsCPU]
 
-		//limitNum, canConvert = cpuLimits.AsInt64()
+		isNil(&clusterQuota.cpuRequests, quotaSpec, v1.ResourceRequestsCPU)
+		isNil(&clusterQuota.cpuLimits, quotaSpec, v1.ResourceLimitsCPU)
 
-		//if canConvert == false {
-		//	fmt.Println("ya dun goofed. Use AsDec instead")
-		//} else {
-		//	// Untested default case should return an int64 and a bool
-		//	limitNum, canConvert = cpuLimits.AsDec().Unscaled()
-		//	if canConvert == false {
-		//		panic("Ya dun goofed")
-		//	}
-		//}
+		isNil(&clusterQuota.memLimits, quotaSpec, v1.ResourceRequestsMemory)
+		isNil(&clusterQuota.memRequests, quotaSpec, v1.ResourceLimitsMemory)
 
-		//cpuLimitSum += limitNum
+		isNil(&clusterQuota.storageRequests, quotaSpec, v1.ResourceRequestsStorage)
 
-		//fmt.Printf(
-		//	"Cluster CPU Limits: %v\n",
-		//	cpuLimitSum,
-		//)
-		//fmt.Println(quota.String())
+		isNil(&clusterQuota.ephemeralStorageRequests, quotaSpec, v1.ResourceRequestsEphemeralStorage)
+		isNil(&clusterQuota.ephemeralStorageLimits, quotaSpec, v1.ResourceLimitsEphemeralStorage)
+
 	}
-	//for i, quota := range quotas.Size() {
-	//	fmt.Printf("%T", quota.Spec)
-	//}
+
 	// https://github.com/kubernetes/client-go/blob/master/kubernetes/typed/core/v1/resourcequota.go
 	// https://godoc.org/k8s.io/api/core/v1#ResourceQuota
-	quotaCount := len(quotas.Items)
-	namespaceCount := len(namespaces.Items)
+	clusterQuota.quotaCount = len(quotas.Items)
+	clusterQuota.namespaceCount = len(namespaces.Items)
 
-	// fmt.Printf("%+v\n", quotas)
-	fmt.Printf(
-		"There are %d quotas on the cluster and %d namespaces\n",
-		quotaCount,
-		namespaceCount,
-	)
-	fmt.Printf(
-		"Cluster CPU Requests: %v\nCluster CPU Limits: %v\n",
-		clusterQuota.cpuRequests,
-		clusterQuota.cpuLimits,
-	)
-	fmt.Printf(
-		"Cluster Mem Requests: %v\nCluster Mem Limits: %v\n",
-		clusterQuota.memRequests,
-		clusterQuota.memLimits,
-	)
+	// At the end here, I should add logic to bring in non-defined values to
+	// clusterQuota. Considering that the quotas present already account for what
+	// exists for defined quotas, I should be safe adding a constant to each item
+	// once that is the difference between namespaceCount and quotaCount
+	// also, I have to convert to int64 here
+	nonDefinedQuotaNamespaceCount := int64(clusterQuota.namespaceCount - clusterQuota.quotaCount)
+	clusterQuota.cpuRequests[1] += nonDefinedQuotaNamespaceCount
+	clusterQuota.cpuLimits[1] += nonDefinedQuotaNamespaceCount
+
+	clusterQuota.memLimits[1] += nonDefinedQuotaNamespaceCount
+	clusterQuota.memRequests[1] += nonDefinedQuotaNamespaceCount
+
+	clusterQuota.storageRequests[1] += nonDefinedQuotaNamespaceCount
+
+	clusterQuota.ephemeralStorageRequests[1] += nonDefinedQuotaNamespaceCount
+	clusterQuota.ephemeralStorageLimits[1] += nonDefinedQuotaNamespaceCount
+
+	PrettyPrint(clusterQuota)
 }
 
 func homeDir() string {
@@ -137,19 +140,73 @@ func homeDir() string {
 	return os.Getenv("USERPROFILE") // windows
 }
 
-func quantityToInt64(c resource.Quantity) int64 {
-	// Logic here is poor
-	var val int64
+func isNil(vals *[2]int64, l v1.ResourceList, name v1.ResourceName) {
+	val, exists := l[name]
+	if exists {
+		vals[0] += quantityToInt64(val)
+	} else {
+		vals[1]++
+	}
+}
+
+func quantityToInt64(c resource.Quantity) (val int64) {
+	// c.i and c.d are not accesible because they aren't in the same package
+	// How do I tell the difference between a non-defined value and a
+	// zero value in golang?
+	// -- Since I have a map, I can check if the key exists and get a boolean back.
+	//  that logic shouldn't be handled this far down
+
 	var canConvert bool
 	val, canConvert = c.AsInt64()
+	// Not 100% confident with this logic, but I want to try a conversion to
+	// int64, then try a conversion to decimal if that fails. If both fail, I'm
+	// probably justified in panicing
 	if canConvert == false {
-		fmt.Println("ya dun goofed. Use AsDec instead")
-	} else {
-		// Untested default case should return an int64 and a bool
 		val, canConvert = c.AsDec().Unscaled()
 		if canConvert == false {
 			panic("Ya dun goofed")
 		}
 	}
 	return val
+}
+
+func allOrInt(num1 [2]int64, num2 int64) (some string) {
+	if num1[1] == num2 {
+		some = "No defined value in all namespaces"
+	} else {
+		some = fmt.Sprintf("%v with no defined value in %v namespaces", num1[0], num1[1])
+	}
+	return some
+}
+func PrettyPrint(q quotaSum) {
+
+	nsCount := int64(q.namespaceCount)
+
+	fmt.Println("PrettyPrint is halfway decent")
+	fmt.Printf("Cluster Stats:\n")
+	fmt.Printf(
+		"There are %d quotas and %d namespaces\n",
+		q.quotaCount,
+		q.namespaceCount,
+	)
+	fmt.Printf(
+		"CPU Requests: %v\nCPU Limits: %v\n",
+		allOrInt(q.cpuRequests, nsCount),
+		allOrInt(q.cpuLimits, nsCount),
+	)
+	fmt.Printf(
+		"Memory Requests: %v\nMemory Limits: %v\n",
+		allOrInt(q.memRequests, nsCount),
+		allOrInt(q.memLimits, nsCount),
+	)
+	fmt.Printf(
+		"Ephemeral Storage Requests: %v\nEphemeral Storage Limits %v\n",
+		allOrInt(q.ephemeralStorageRequests, nsCount),
+		allOrInt(q.ephemeralStorageLimits, nsCount),
+	)
+
+	fmt.Printf(
+		"Storage Requests: %v\n",
+		allOrInt(q.storageRequests, nsCount),
+	)
 }
